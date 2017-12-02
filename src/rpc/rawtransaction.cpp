@@ -973,19 +973,150 @@ UniValue sendrawtransaction(const JSONRPCRequest& request)
     return hashTx.GetHex();
 }
 
-static const CRPCCommand commands[] =
-{ //  category              name                      actor (function)         okSafeMode
-  //  --------------------- ------------------------  -----------------------  ----------
-    { "rawtransactions",    "getrawtransaction",      &getrawtransaction,      true,  {"txid","verbose"} },
-    { "rawtransactions",    "createrawtransaction",   &createrawtransaction,   true,  {"inputs","outputs","locktime","replaceable"} },
-    { "rawtransactions",    "decoderawtransaction",   &decoderawtransaction,   true,  {"hexstring"} },
-    { "rawtransactions",    "decodescript",           &decodescript,           true,  {"hexstring"} },
-    { "rawtransactions",    "sendrawtransaction",     &sendrawtransaction,     false, {"hexstring","allowhighfees"} },
-    { "rawtransactions",    "combinerawtransaction",  &combinerawtransaction,  true,  {"txs"} },
-    { "rawtransactions",    "signrawtransaction",     &signrawtransaction,     false, {"hexstring","prevtxs","privkeys","sighashtype"} }, /* uses wallet if enabled */
+UniValue signsendrawtransaction(const JSONRPCRequest& request)
+{
+	JSONRPCRequest reqSend = JSONRPCRequest();
+	JSONRPCRequest reqSign = JSONRPCRequest();
+	reqSend.params = UniValue(UniValue::VARR);
+	reqSign.params = UniValue(UniValue::VARR);
+	
+	reqSign.params.push_back(request.params[0]);
+	reqSign.params.push_back(request.params[1]);
+	reqSign.params.push_back(request.params[2]);
+	
+	UniValue signedRawTransaction = signrawtransaction(reqSign);
+	
+	reqSend.params.push_back(signedRawTransaction["hex"]);
+	if (request.params.size() > 3)
+		reqSend.params.push_back(request.params[3]);
+	
+	return sendrawtransaction(reqSend);
+}
 
-    { "blockchain",         "gettxoutproof",          &gettxoutproof,          true,  {"txids", "blockhash"} },
-    { "blockchain",         "verifytxoutproof",       &verifytxoutproof,       true,  {"proof"} },
+UniValue reqAddresses;
+
+bool inReqAddresses(const std::string& addr)
+{
+	for(unsigned int i = 0; i < reqAddresses.size(); i++) {
+		if(addr.compare(reqAddresses[i].get_str()) == 0 )
+			return true;
+	}
+	return false;
+}
+
+bool inRequest(const CTransaction& tx)
+{
+    txnouttype type;
+    std::vector<CTxDestination> addresses;
+    int nRequired;
+	
+    for (unsigned int i = 0; i < tx.vout.size(); i++) {
+        ExtractDestinations(tx.vout[i].scriptPubKey, type, addresses, nRequired);
+		
+	    for (const CTxDestination& addr : addresses)
+	        if(inReqAddresses(CBitcoinAddress(addr).ToString()))
+				return true;
+    }
+	return false;
+}
+
+bool inTime(const CTransaction& tx)
+{
+	return false;
+}
+
+UniValue getrtx(const std::string& txid, bool checkInReq = false)
+{
+	UniValue null(UniValue::VNULL);
+	
+    LOCK(cs_main);
+
+    uint256 hash = ParseHashV(txid, "parameter 1");
+
+    CTransactionRef tx;
+    uint256 hashBlock;
+    if (!GetTransaction(hash, tx, Params().GetConsensus(), hashBlock, true))
+        return null;
+	
+	if(checkInReq)
+		if(!inRequest(*tx))
+			return null;
+
+    UniValue result(UniValue::VOBJ);
+    TxToJSON(*tx, hashBlock, result);
+    return result;
+}
+
+UniValue gettxsfrommempoolbyaddresses(const JSONRPCRequest& request)
+{
+	reqAddresses = request.params;
+	
+    std::vector<uint256> vtxid;
+    mempool.queryHashes(vtxid);
+
+	UniValue tmp;
+    UniValue a(UniValue::VARR);
+    for (const uint256& hash : vtxid) {
+		tmp = getrtx(hash.ToString(), true);
+		if(!tmp.isNull())
+			a.push_back(tmp);
+    }
+
+    return a;
+}
+
+static std::map<std::string, int> last_times = {};
+
+UniValue getTxHashesByTime(UniValue id)
+{		
+	UniValue a(UniValue::VARR);
+	int last_time = GetTime();
+	
+	if(last_times.find(id.get_str()) != last_times.end()) {
+		last_time = last_times[id.get_str()];
+		last_times[id.get_str()] = GetTime();
+	} else {
+		last_times[id.get_str()] = last_time;
+	}
+	
+    LOCK(mempool.cs);
+    for (const CTxMemPoolEntry& e : mempool.mapTx)
+    {
+		if(e.GetTime() > last_time)
+			a.push_back(e.GetTx().GetHash().ToString());
+    }
+	
+	return a;
+}
+
+UniValue getextendrawmempool(const JSONRPCRequest& request)
+{	
+	UniValue result(UniValue::VARR);
+	UniValue hashes = getTxHashesByTime(request.params[0]);
+
+	for(size_t i = 0; i < hashes.size() && i < 1000; i++) {
+		result.push_back(getrtx(hashes[i].get_str()));
+	}
+	
+    return result;
+}
+
+static const CRPCCommand commands[] =
+{ //  category              name                      		actor (function)         			okSafeMode
+  //  --------------------- ------------------------  		-----------------------  			----------
+    { "rawtransactions",    "getrawtransaction",      		&getrawtransaction,      			true,  {"txid","verbose"} },
+    { "rawtransactions",    "createrawtransaction",   		&createrawtransaction,   			true,  {"inputs","outputs","locktime","replaceable"} },
+    { "rawtransactions",    "decoderawtransaction",   		&decoderawtransaction,   			true,  {"hexstring"} },
+    { "rawtransactions",    "decodescript",           		&decodescript,           			true,  {"hexstring"} },
+    { "rawtransactions",    "sendrawtransaction",     		&sendrawtransaction,     			false, {"hexstring","allowhighfees"} },
+    { "rawtransactions",    "combinerawtransaction",  		&combinerawtransaction,  			true,  {"txs"} },
+    { "rawtransactions",    "signrawtransaction",     		&signrawtransaction,     			false, {"hexstring","prevtxs","privkeys","sighashtype"} }, /* uses wallet if enabled */
+	{ "rawtransactions",    "signsendrawtransaction", 		&signsendrawtransaction, 			false, {"hexstring","prevtxs","privkeys","sighashtype"} }, /* uses wallet if enabled */
+	
+    { "blockchain",         "gettxoutproof",          		&gettxoutproof,          			true,  {"txids", "blockhash"} },
+    { "blockchain",         "verifytxoutproof",      		&verifytxoutproof,       			true,  {"proof"} },
+	{ "blockchain",         "gettxsfrommempoolbyaddresses", &gettxsfrommempoolbyaddresses,    	true,  {"txid", "txid1", "txid2", "..."} },
+	{ "blockchain",         "getextendrawmempool",    		&getextendrawmempool,    			true,  {"id"} },
 };
 
 void RegisterRawTransactionRPCCommands(CRPCTable &t)
